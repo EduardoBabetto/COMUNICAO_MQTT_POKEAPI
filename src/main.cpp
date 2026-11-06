@@ -1,250 +1,416 @@
+/* 
+PROJETO: COMUNICACAO MQTT ENTRE ESP32
+DESCRICAO: COMUNICAR COM OUTRO ESP32 PELO MQTT
+NOME: EDUARDO DOS SANTOS BABETTO 
+DATA: 05/11/2026
+VERSAO: 0.1
+*/
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <LiquidCrystal_I2C.h>
 #include <Botao.h>
+#include <LiquidCrystal_I2C.h>
 #include <HTTPClient.h>
-
-void aoReceber(char*, byte*, unsigned int);
-void tratarJson(String);
-void montarTelaLcd();
-String pedirParaApi(String);
-void statusConexao();
-
-LiquidCrystal_I2C lcd (0x27,20,4);
-Botao btnCima(13);
-Botao btnBaixo(14);
-Botao btnEnter(15);
-
 
 const char* SSID = "SENAI EDUCACIONAL";
 const char* SENHA = "info@134";
 
-const String enderecoAPI = "https://pokeapi.co/api/v2/pokemon/";
-
-const char* BROKER = "broker.emqx.io"; //* endereço do servidor mqtt
+const char* BROKER = "broker.emqx.io";
 const int PORTA = 1883;
+
 const char* TOPICO_SUB = "senai134/esp32/eduardo-gustavo/comando";
 const char* TOPICO_PUB = "senai134/esp32/eduardo-gustavo/status";
+const char *TOPICO_POKEMON= "senai134/esp32/eduardo-gustavo/pokemon";
 
-WiFiClient wifiClient; //* Instancia um cliente para que outros objetos utilizem a conexão WiFi
-PubSubClient mqtt(wifiClient); //* Instancia um objeto para criar conexão com o broker
-int contador = 0;
+const String enderecoAPI = "https://pokeapi.co/api/v2/pokemon/";
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+Botao btnCima(11);
+Botao btnBaixo(12);
+Botao btnEnter(13);
+
+String nomePokemon = "";
+int pokedex = 1;
+String typesPokemon[2] = {"", ""};
+
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+String pedirParaApi(int id);
+void buscarNomePokemon(int id);
+bool montarTelalcd(int id);
+void aoReceber(char* topico, byte* payload, unsigned int tamanho);
+void tratarJson(String mensagem);
+void telaInicial();
+void statusConexao();
+void conexao();
+void mqttPokemon();
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println();
-  lcd.init();
-  lcd.backlight();
+    Serial.begin(115200);
 
-  btnCima.iniciar();
-  btnEnter.iniciar();
-  btnBaixo.iniciar();
-  
+    lcd.init();
+    lcd.backlight();
 
-  Serial.printf("Conectando na rede %s\n\r", SSID);
-  rgbLedWrite(48, 255, 0, 0);
-  WiFi.begin(SSID, SENHA);
+    conexao();
 
-  while(WiFi.status() != WL_CONNECTED) { 
-    Serial.print(".");
-    rgbLedWrite(48, 0, 0, 0);
-    delay(500);
-    rgbLedWrite(48, 255, 255, 0);
-    delay(200);
-  }
-  delay(1000);
+    btnCima.iniciar();
+    btnBaixo.iniciar();
+    btnEnter.iniciar();
 
-  Serial.printf("\n\rConectado a rede %s com sucesso\n\r", SSID);
-
-  rgbLedWrite(48, 255, 255, 0);
-
-  Serial.printf("Conectando ao Broker %s\n\r", BROKER);
-
-  
-  mqtt.setServer(BROKER, PORTA); //! PORTA: 1883 ou 8883
-  mqtt.setCallback(aoReceber);
-  
-  String id = "esp32-" + String((uint32_t)ESP.getEfuseMac(), HEX);
-  
-  bool conectadoAoBroker = false;
-  conectadoAoBroker = mqtt.connect(id.c_str());   
-  
-  if(conectadoAoBroker) {
-    Serial.printf("Conectado ao broker %s com sucesso!\n\r", BROKER);
-    mqtt.subscribe(TOPICO_SUB); //* Ajustado para se inscrever no tópico de comando
-    Serial.printf("Inscrito no tópico: %s\n\r", TOPICO_SUB);
-    rgbLedWrite(48, 0, 255, 0);
-  } else {
-    Serial.printf("falha ao conectar ao broker %s\n\r", BROKER); //* Adicionado BROKER que faltava
-    Serial.print("Falha: "); 
-    Serial.println(mqtt.state());
-    rgbLedWrite(48, 255, 0, 0);
-    delay(1000);
-    rgbLedWrite(48,255,255,0);
-  }
+    lcd.clear();
+    telaInicial();
 }
 
-void loop() { 
-  mqtt.loop(); 
-  statusConexao();
+void loop() {
+    mqtt.loop();
+    statusConexao();
 
-  String pokemon = pedirParaApi(String(contador));
-  static int flagEnvio = 0;
+    btnBaixo.atualizar();
+    btnCima.atualizar();
+    btnEnter.atualizar();
 
-  btnBaixo.atualizar();
-  btnCima.atualizar();
-  btnEnter.atualizar();
-
-  if(btnBaixo.pressionou()){
-    if(contador < 1025) contador++;
-  }
-  if(btnCima.pressionou()){
-    if(contador > 0 ) contador--;
-  }
-  if(btnEnter.pressionou()){
-   montarTelalcd(pokemon);
-  }
-}
-
-void aoReceber(char* topico, byte* payload, unsigned int tamanho){
-  String mensagem;
-  mensagem.reserve(tamanho); //* evita realocações enquanto a string cresce.
-
-  for(unsigned int i = 0; i < tamanho; i++) { mensagem += (char)payload[i]; }
-
-  Serial.printf("Mensagem Recebida no tópico: %s \n\r mensagem:\n\r %s\n\n\r", topico, mensagem.c_str());
-
-  rgbLedWrite(48, 0, 0, 0);
-  delay(500);
-  rgbLedWrite(48, 0, 0, 255);
-  delay(200);
-
-  tratarJson(mensagem);
-}
-
-void tratarJson(String mensagem){
-  JsonDocument doc;
-
-  DeserializationError codigoErro = deserializeJson(doc, mensagem);
-
-  if (codigoErro) {
-    Serial.print("Falha na desserializacao: ");
-    Serial.println(codigoErro.f_str());
-    rgbLedWrite(48,255,0,0);
-    return;
-  }
-
-  bool estadoLed = doc["estadoLed"].as<bool>();
-
-  if(estadoLed) {
-    Serial.println("LED LIGADO");
-    rgbLedWrite(48, 0, 0, 255);
-  } else { //* Corrigido: era else(estadoLed), trocado para apenas else
-    Serial.println("LED DESLIGADO");
-    rgbLedWrite(48, 0, 0, 0);
-  }            
-}
-
-String pedirParaApi(String codigo){
-    HTTPClient http;
-    http.begin(enderecoAPI + codigo);
-
-    int codigoHTTP = http.GET(); //* Retorna o codigo HTTP ex.:200 -> OK ou 404 -> Not found
-
-    String resposta;
-
-    if(codigoHTTP == 200){
-        resposta = http.getString();//* Retorna o conteudo HTML da pagina
-    }
-    else {
-        Serial.printf("Deu erro. Codigo: %d\n\r",codigoHTTP );
-    }
-    http.end();
-    return resposta;
-}
-
-void montarTelalcd(String pokemon){
-
-  JsonDocument doc;
-  DeserializationError erroJson = deserializeJson(doc, pokemon );
-
-   switch(erroJson.code()){
-    case DeserializationError :: Ok: break;;
-    case DeserializationError::InvalidInput: Serial.println("Json mal formado"); return;
-    case DeserializationError :: EmptyInput : Serial.println("JSON vazio ou timeout"); return;
-    case DeserializationError::IncompleteInput: Serial.println("JSON incompleto"); return;
-    case DeserializationError :: NoMemory : Serial.println("Sem memoriat"); return;
-    case DeserializationError:: TooDeep : Serial.println("Alinhamento acima do limite definido pela funcao"); return;
-
-    default: Serial.println(erroJson.c_str()); break;
- 
-  }
-
-  const char* nome = "";
-  int pokedex = 0;
-  
-
-  if(doc["name"].is<const char*>())
-  {
-     nome = doc["name"].as<const char*>();
-     Serial.printf("Pokemon: %s", nome);
-     lcd.setCursor(0,0);
-     lcd.printf("Pokemon: %s", nome);
-  }
-  if(doc["id"].is<int>())
-  {
-     pokedex = doc["id"].as<int>();
-     Serial.printf("Pokedex: %u", pokedex);
-     lcd.setCursor(0,1);
-     lcd.printf("Pokedex: %u", pokedex);
-  }
-  if(doc["types"].is<JsonArray>()){
-    JsonArray types = doc["types"];
-    int qntTypes = types.size();
-
-    for(int i = 0; i < qntTypes ;i++){
-
-    int slot = types[i]["slot"].as<int>();
-
-    Serial.printf("Type %u: %s",slot,types[i]["type"]["name"].as<const char*>());
-
-    lcd.setCursor(0,i+2);
-    lcd.printf("Type %u: %s",slot,types[i]["type"]["name"].as<const char*>());
+    // Navegação no Menu (Aumenta ID)
+    if (btnCima.pressionou()) {
+        if (pokedex < 1025) pokedex++;
+        buscarNomePokemon(pokedex);
+        telaInicial();
     }
 
-  }
-  }
+    // Navegação no Menu (Diminui ID)
+    if (btnBaixo.pressionou()) {
+        if (pokedex > 1) pokedex--;
+        buscarNomePokemon(pokedex);
+        telaInicial();
+    }
 
-  void statusConexao(){
-  const unsigned long tempoEntreEnvios = 5000;
-  static unsigned long ultimoEnvio = 0;
-  bool conectado = mqtt.state() == MQTT_CONNECTED ? true : false;
-  
-  const char* usuario = "GustavoRosa";
-  IPAddress IP = WiFi.localIP();
-  unsigned int timestamp = 1793796662;
-  String mensagemErro = "Sem erro";
+    // Confirmação: Mostra a Tela de Detalhes Completa
+    if (btnEnter.pressionou()) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Carregando...");
 
+        if (montarTelalcd(pokedex)) {
+            mqttPokemon(); // Publica os dados completos no broker MQTT
+        } else {
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Erro ao carregar!");
+            delay(1500);
+            telaInicial();
+        }
+    }
+}
 
-  if(millis() - ultimoEnvio > tempoEntreEnvios){
-
-    Serial.println("Formatando as mensagens de erro");
-
-    ultimoEnvio = millis();
-    JsonDocument doc;
-    doc["conectado"] = conectado;
-    doc["usuario"] = usuario;
-    doc["IP"] = IP.toString();
-    doc["timestamp"] = timestamp;
-    doc["mensagemErro"] = mensagemErro;
-
+void aoReceber(char* topico, byte* payload, unsigned int tamanho) {
 
     String mensagem;
-    serializeJson(doc,mensagem);
+    mensagem.reserve(tamanho);
 
-    mqtt.publish(TOPICO_PUB, mensagem.c_str());
-    Serial.printf("Mensagem a ser enviada no topico %s: \n\r%s",TOPICO_PUB, mensagem.c_str());
+    for (unsigned int i = 0; i < tamanho; i++) {
+        mensagem += (char)payload[i];
+    }
+
+    Serial.printf("Mensagem recebida no tópico: %s\n", topico);
+    Serial.println(mensagem);
+
+    rgbLedWrite(48, 0, 0, 0);
+    delay(500);
+
+    rgbLedWrite(48, 0, 0, 255);
+    delay(200);
+
+    tratarJson(mensagem);
+}
+
+void tratarJson(String mensagem) {
+
+    JsonDocument doc;
+
+    DeserializationError codigoErro = deserializeJson(doc, mensagem);
+
+    if (codigoErro) {
+        Serial.println("Erro ao interpretar JSON!");
+        return;
+    }
+
+    bool estadoLed = doc["estadoLed"].as<bool>();
+
+    if (estadoLed) {
+        Serial.println("LED LIGADO");
+        rgbLedWrite(48, 0, 0, 255);
+    }
+    else {
+        Serial.println("LED DESLIGADO");
+        rgbLedWrite(48, 0, 0, 0);
+    }
+}
+
+void statusConexao() {
+
+    const unsigned long tempoEntreEnvios = 5000;
+    static unsigned long ultimoEnvio = 0;
+
+    bool conectado = mqtt.connected();
+
+    const char* usuario = "GustavoRosa";
+
+    IPAddress IP = WiFi.localIP();
+
+    unsigned int timestamp = 1793796662;
+
+    String mensagemErro = "Sem erro";
+
+    if (millis() - ultimoEnvio >= tempoEntreEnvios) {
+
+        ultimoEnvio = millis();
+
+        JsonDocument doc;
+
+        doc["conectado"] = conectado;
+        doc["usuario"] = usuario;
+        doc["IP"] = IP.toString();
+        doc["timestamp"] = timestamp;
+        doc["mensagemErro"] = mensagemErro;
+
+        String mensagem;
+
+        serializeJson(doc, mensagem);
+
+        if (mqtt.connected()) {
+            mqtt.publish(TOPICO_PUB, mensagem.c_str());
+        }
+
+        Serial.printf(
+            "Mensagem enviada no tópico %s:\n%s\n",
+            TOPICO_PUB,
+            mensagem.c_str()
+        );
+    }
+}
+
+//* ===============================DISPLAY===============================
+void telaInicial() {
+    lcd.setCursor(0, 0);
+    lcd.printf("SELECIONE ID: %-4d ", pokedex);
+    
+    lcd.setCursor(0, 1);
+    lcd.printf("NOME: %-14s", nomePokemon.c_str());
+
+    lcd.setCursor(0, 2);
+    lcd.print("ENTER = CONFIRMAR   ");
+}
+//* =====================================================================
+
+//* ===============================DISPLAY===============================
+void conexao() {
+
+    String id = "esp32-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Conectando WiFi...");
+
+    //! =================SERIAL==================
+    Serial.printf("Conectando na rede %s", SSID);
+
+    WiFi.begin(SSID, SENHA);
+
+    rgbLedWrite(48, 255, 0, 0);
+
+    while (WiFi.status() != WL_CONNECTED) {
+
+      Serial.print(".");
+    //! ==========================================
+
+      delay(500);
+
+      rgbLedWrite(48, 0, 0, 0);
+      delay(500);
+
+      rgbLedWrite(48, 255, 255, 0);
+      delay(500);
+    }
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi conectado!");
+
+    //! ===================SERIAL===================
+    Serial.printf("\nWiFi conectado com sucesso!\n");
+    //! ============================================
+
+    rgbLedWrite(48, 255, 255, 0);
+
+    delay(1500);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Conectando Broker:");
+    lcd.setCursor(0, 1);
+    lcd.print(BROKER);
+
+    //! ===================SERIAL===================
+    Serial.printf("Conectando ao Broker %s\n", BROKER);
+    //! ============================================
+
+    mqtt.setServer(BROKER, PORTA);
+    mqtt.setCallback(aoReceber);
+
+    bool conectadoAoBroker = mqtt.connect(id.c_str());
+
+    if (conectadoAoBroker) {
+
+        mqtt.subscribe(TOPICO_SUB);
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Broker conectado!");
+
+        lcd.setCursor(0, 1);
+        lcd.print("MQTT conectado!");
+
+        //! =========================SERIAL=========================
+        Serial.printf("Conectado ao broker %s com sucesso!\n", BROKER);
+        Serial.printf("Inscrito no tópico: %s\n", TOPICO_SUB);
+        //! ========================================================
+
+        rgbLedWrite(48, 0, 255, 0);
+
+    }
+    else {
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Falha no Broker!");
+
+        //! =========================SERIAL=========================
+        Serial.printf("Falha ao conectar ao broker %s\n", BROKER);
+        Serial.print("Falha: ");
+        Serial.println(mqtt.state());
+        //! ========================================================
+
+        rgbLedWrite(48, 255, 0, 0);
+
+        delay(2000);
+    }
+
+    delay(1500);
+}
+//* ===============================DISPLAY===============================
+
+
+String pedirParaApi(int codigo) {
+  HTTPClient http;
+  http.begin(enderecoAPI + codigo);
+
+  int codigoHTTP = http.GET(); //* Retorna o codigo HTTP ex.:200 -> OK ou 404 -> Not found
+
+  String resposta;
+
+  if (codigoHTTP == 200)
+  {
+    resposta = http.getString(); //* Retorna o conteudo HTML da pagina
   }
+  else
+  {
+    Serial.printf("Deu erro. Codigo: %d\n\r", codigoHTTP);
+  }
+  http.end();
+  return resposta;
+}
+
+
+bool montarTelalcd(int id) {
+    String jsonString = pedirParaApi(id);
+    if (jsonString.length() == 0) return false;
+
+    // Filtra apenas o necessário para montar a tela completa
+    JsonDocument filter;
+    filter["name"] = true;
+    filter["id"] = true;
+    filter["types"][0]["slot"] = true;
+    filter["types"][0]["type"]["name"] = true;
+
+    JsonDocument doc;
+    DeserializationError erroJson = deserializeJson(doc, jsonString, DeserializationOption::Filter(filter));
+
+    if (erroJson) {
+        Serial.printf("Erro ao interpretar JSON: %s\n", erroJson.c_str());
+        return false;
+    }
+
+    typesPokemon[0] = "";
+    typesPokemon[1] = "";
+
+    if (doc["name"].is<const char*>()) {
+        nomePokemon = doc["name"].as<String>();
+    }
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.printf("Pokemon: %-11s", nomePokemon.c_str());
+
+    lcd.setCursor(0, 1);
+    lcd.printf("Pokedex: %-11d", id);
+
+    if (doc["types"].is<JsonArray>()) {
+        JsonArray types = doc["types"];
+        int qntTypes = types.size();
+
+        for (int i = 0; i < qntTypes && i < 2; i++) {
+            int slot = types[i]["slot"].as<int>();
+            const char* typeName = types[i]["type"]["name"].as<const char*>();
+
+            typesPokemon[i] = String(typeName);
+
+            lcd.setCursor(0, i + 2);
+            lcd.printf("Type %d: %-12s", slot, typeName);
+        }
+    }
+    return true;
+}
+
+
+void mqttPokemon () {
+    const char *usuario = "GustavoRosa";
+
+    Serial.println("Formatando as mensagens de erro");
+    JsonDocument doc;
+    
+    doc["usuario"] = usuario;
+    doc["pokemon"] = nomePokemon;
+    doc["pokedex"] = pokedex;
+    doc["type1"] = typesPokemon[0];
+    doc["type2"] = typesPokemon[1];
+
+    String mensagem;
+    serializeJson(doc, mensagem);
+
+    mqtt.publish(TOPICO_POKEMON, mensagem.c_str());
+    Serial.printf("Mensagem a ser enviada no topico %s: \n\r%s", TOPICO_POKEMON, mensagem.c_str());
+}
+
+void buscarNomePokemon(int id) {
+    String jsonString = pedirParaApi(id);
+
+    if (jsonString.length() == 0) {
+        nomePokemon = "Nao encontrado";
+        return;
+    }
+
+    // Filtro restrito: pega apenas a chave "name"
+    JsonDocument filter;
+    filter["name"] = true;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, jsonString, DeserializationOption::Filter(filter));
+
+    if (!err && doc["name"].is<const char*>()) {
+        nomePokemon = doc["name"].as<String>();
+    } else {
+        nomePokemon = "Erro JSON";
+    }
 }
